@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>審判長廊：夜之試煉</title>
+  <style>
+    /* ===== 全域設定：像素字體、色彩與版面 ===== */
+    :root {
+      --cyan: #5df6ff;
+      --pink: #ff5dba;
+      --gold: #ffe66d;
+      --panel: rgba(5, 8, 22, .88);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; overflow: hidden;
+      display: grid; place-items: center;
+      background: #050713; color: #fff;
+      font-family: "Courier New", monospace;
+    }
+    /* ===== 遊戲外框 ===== */
+    #shell {
+      width: min(100vw, 1000px); padding: 12px;
+      border: 3px solid #53617e; background: #090d1c;
+      box-shadow: 0 0 30px #182c5b, inset 0 0 25px #000;
+    }
+    #topbar {
+      display: flex; justify-content: space-between; gap: 10px;
+      padding: 5px 8px 10px; font-size: 14px; letter-spacing: 1px;
+    }
+    #game {
+      display: block; width: 100%; height: auto;
+      aspect-ratio: 16 / 9; background: #070b1d;
+      border: 2px solid #aab5d4; image-rendering: pixelated;
+    }
+    /* ===== 操作說明與按鈕 ===== */
+    #bottom {
+      display: flex; flex-wrap: wrap; align-items: center;
+      justify-content: space-between; gap: 10px; padding: 10px 4px 2px;
+      font-size: 12px; color: #c8d2ed;
+    }
+    button {
+      color: #fff; background: #252c49; border: 2px solid #8795c0;
+      padding: 8px 14px; font: bold 13px "Courier New", monospace;
+      cursor: pointer; box-shadow: 3px 3px 0 #000;
+    }
+    button:hover { background: #39476d; }
+    button:focus-visible { outline: 2px solid var(--gold); }
+    /* ===== 小螢幕調整 ===== */
+    @media (max-width: 600px) {
+      #shell { padding: 6px; }
+      #topbar { font-size: 11px; }
+      #bottom { font-size: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <main id="shell">
+    <header id="topbar">
+      <span>★ NIGHT JUDGMENT</span>
+      <span id="status">準備接受審判？</span>
+      <span id="hp">HP 20 / 20</span>
+    </header>
+
+    <!-- 遊戲畫面由 Canvas 繪製，保持單檔即可執行 -->
+    <canvas id="game" width="800" height="450" aria-label="像素風格閃避遊戲"></canvas>
+
+    <footer id="bottom">
+      <span>移動：方向鍵 / WASD　　手機：按住畫面拖曳</span>
+      <span>避開骨刺與光束，撐過所有回合！</span>
+      <button id="start">開始 / 重新開始</button>
+    </footer>
+  </main>
+
+  <script>
+    // ===== 取得畫布與介面元素 =====
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const hpEl = document.getElementById("hp");
+    const startBtn = document.getElementById("start");
+
+    // ===== 遊戲基本設定 =====
+    const W = canvas.width, H = canvas.height;
+    const arena = { x: 250, y: 205, w: 300, h: 190 };
+    const keys = {};
+    let player, attacks, particles, stars, frame, hp, phase, running, won;
+    let pointerDown = false;
+    let pointer = { x: W / 2, y: H - 70 };
+
+    // ===== 建立星空：每顆星都有自己的閃爍速度 =====
+    function makeStars() {
+      return Array.from({ length: 100 }, () => ({
+        x: Math.random() * W, y: Math.random() * H,
+        r: Math.random() * 1.7 + .4, twinkle: Math.random() * 6.28,
+        speed: Math.random() * .035 + .01
+      }));
+    }
+    stars = makeStars();
+
+    // ===== 初始化一局遊戲 =====
+    function resetGame() {
+      player = { x: W / 2, y: arena.y + arena.h - 28, size: 9, speed: 3.3, inv: 0 };
+      attacks = [];
+      particles = [];
+      frame = 0; hp = 20; phase = 0; running = true; won = false;
+      statusEl.textContent = "審判開始——保持移動！";
+      updateHud();
+    }
+
+    // ===== 更新血量文字 =====
+    function updateHud() {
+      hpEl.textContent = `HP ${hp} / 20`;
+    }
+
+    // ===== 產生粒子，用於星塵與受擊閃光 =====
+    function burst(x, y, color, amount = 8) {
+      for (let i = 0; i < amount; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const s = Math.random() * 2.5 + .5;
+        particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+          life: 25 + Math.random() * 15, color });
+      }
+    }
+
+    // ===== 產生骨刺：從畫面邊緣或上方進入競技場 =====
+    function spawnBone(side, tall = false) {
+      const horizontal = side === "left" || side === "right";
+      const length = tall ? 115 : 65;
+      let x, y, vx, vy, w, h;
+      if (horizontal) {
+        x = side === "left" ? arena.x - length : arena.x + arena.w + length;
+        y = arena.y + 12 + Math.random() * (arena.h - 24);
+        vx = side === "left" ? 3.1 : -3.1; vy = 0;
+        w = length; h = 13;
+      } else {
+        x = arena.x + 12 + Math.random() * (arena.w - 24);
+        y = arena.y - length;
+        vx = 0; vy = 3.0; w = 13; h = length;
+      }
+      attacks.push({ type: "bone", x, y, vx, vy, w, h, life: 180 });
+    }
+
+    // ===== 產生追蹤光球：緩慢朝玩家方向移動 =====
+    function spawnOrb() {
+      const side = Math.floor(Math.random() * 4);
+      let x = side === 0 ? arena.x : side === 1 ? arena.x + arena.w :
+              arena.x + Math.random() * arena.w;
+      let y = side === 2 ? arena.y : side === 3 ? arena.y + arena.h :
+              arena.y + Math.random() * arena.h;
+      const dx = player.x - x, dy = player.y - y;
+      const d = Math.hypot(dx, dy) || 1;
+      attacks.push({ type: "orb", x, y, vx: dx / d * 1.55,
+        vy: dy / d * 1.55, r: 7, life: 220 });
+    }
+
+    // ===== 產生橫向光束：先預警，再短暫啟動 =====
+    function spawnBeam() {
+      const y = arena.y + 20 + Math.random() * (arena.h - 40);
+      attacks.push({ type: "beam", x: arena.x, y, w: arena.w,
+        h: 12, life: 65, active: false });
+    }
+
+    // ===== 依照回合安排攻擊節奏 =====
+    function attackDirector() {
+      if (phase === 0) {
+        if (frame % 48 === 0) spawnBone("left");
+        if (frame % 78 === 0) spawnBone("right", true);
+      } else if (phase === 1) {
+        if (frame % 52 === 0) spawnBone("top", true);
+        if (frame % 95 === 0) spawnOrb();
+      } else if (phase === 2) {
+        if (frame % 78 === 0) spawnBeam();
+        if (frame % 42 === 0) spawnBone(Math.random() < .5 ? "left" : "right");
+        if (frame % 115 === 0) spawnOrb();
+      }
+    }
+
+    // ===== 簡單矩形碰撞判定 =====
+    function rectHit(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x &&
+             a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    // ===== 更新玩家、攻擊物與粒子 =====
+    function update() {
+      if (!running) return;
+      frame++;
+
+      // 每回合約 12 秒，逐步提高攻擊變化
+      const nextPhase = frame < 720 ? 0 : frame < 1440 ? 1 : 2;
+      if (nextPhase !== phase) {
+        phase = nextPhase;
+        statusEl.textContent = ["第一回合：骨刺來襲", "第二回合：注意追蹤光球",
+          "最終回合：光束與骨刺！"][phase];
+      }
+      if (frame >= 2160) {
+        running = false; won = true;
+        statusEl.textContent = "審判結束！你成功撐過試煉。";
+        return;
+      }
+
+      // 鍵盤輸入轉換成移動方向
+      let dx = (keys.ArrowRight || keys.d ? 1 : 0) - (keys.ArrowLeft || keys.a ? 1 : 0);
+      let dy = (keys.ArrowDown || keys.s ? 1 : 0) - (keys.ArrowUp || keys.w ? 1 : 0);
+
+      // 觸控拖曳時，玩家會朝手指位置移動
+      if (pointerDown) {
+        dx = Math.abs(pointer.x - player.x) > 5 ? Math.sign(pointer.x - player.x) : 0;
+        dy = Math.abs(pointer.y - player.y) > 5 ? Math.sign(pointer.y - player.y) : 0;
+      }
+
+      // 斜向移動時正規化速度，避免移動較快
+      const mag = Math.hypot(dx, dy) || 1;
+      player.x += dx / mag * player.speed;
+      player.y += dy / mag * player.speed;
+
+      // 將玩家限制在白色戰鬥框內
+      player.x = Math.max(arena.x + 12, Math.min(arena.x + arena.w - 12, player.x));
+      player.y = Math.max(arena.y + 12, Math.min(arena.y + arena.h - 12, player.y));
+      if (player.inv > 0) player.inv--;
+
+      // 依回合生成攻擊
+      attackDirector();
+
+      // 更新攻擊物位置、生命週期與碰撞
+      attacks = attacks.filter(a => {
+        if (a.type === "beam") {
+          a.life--;
+          a.active = a.life < 28;
+          if (a.active && player.inv <= 0 &&
+              Math.abs(player.y - a.y) < a.h / 2 + player.size) hitPlayer();
+          return a.life > 0;
+        }
+        a.x += a.vx; a.y += a.vy; a.life--;
+
+        // 骨刺碰撞盒稍微縮小，讓閃避更公平
+        const hitBox = a.type === "bone"
+          ? { x: a.x + 4, y: a.y + 4, w: a.w - 8, h: a.h - 8 }
+          : { x: a.x - a.r, y: a.y - a.r, w: a.r * 2, h: a.r * 2 };
+        const playerBox = { x: player.x - 6, y: player.y - 6, w: 12, h: 12 };
+        if (player.inv <= 0 && rectHit(playerBox, hitBox)) hitPlayer();
+
+        // 超出競技場附近的攻擊物會自動消失
+        return a.life > 0 && a.x > arena.x - 150 && a.x < arena.x + arena.w + 150 &&
+               a.y > arena.y - 150 && a.y < arena.y + arena.h + 150;
+      });
+
+      // 更新星塵粒子
+      particles = particles.filter(p => {
+        p.x += p.vx; p.y += p.vy; p.life--;
+        return p.life > 0;
+      });
+
+      // 背景星星緩慢閃爍
+      stars.forEach(s => s.twinkle += s.speed);
+    }
+
+    // ===== 玩家受擊：扣血、短暫無敵並產生閃光 =====
+    function hitPlayer() {
+      hp = Math.max(0, hp - 1);
+      player.inv = 48;
+      burst(player.x, player.y, "#ff4f9a", 12);
+      updateHud();
+      if (hp <= 0) {
+        running = false;
+        statusEl.textContent = "試煉失敗——按下重新開始再挑戰。";
+      }
+    }
+
+    // ===== 繪製夜空與遠方像素城堡 =====
+    function drawBackground() {
+      const gradient = ctx.createLinearGradient(0, 0, 0, H);
+      gradient.addColorStop(0, "#080d2c");
+      gradient.addColorStop(.65, "#15183c");
+      gradient.addColorStop(1, "#080914");
+      ctx.fillStyle = gradient; ctx.fillRect(0, 0, W, H);
+
+      // 閃爍星點
+      stars.forEach(s => {
+        const alpha = .35 + (Math.sin(s.twinkle) + 1) * .3;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = "#dce8ff";
+        ctx.fillRect(Math.floor(s.x), Math.floor(s.y), s.r, s.r);
+      });
+      ctx.globalAlpha = 1;
+
+      // 月亮與光暈
+      ctx.fillStyle = "rgba(130,170,255,.08)";
+      ctx.beginPath(); ctx.arc(650, 95, 58, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#dce7ff";
+      ctx.beginPath(); ctx.arc(650, 95, 28, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#aab9e8";
+      ctx.beginPath(); ctx.arc(661, 86, 25, 0, Math.PI * 2); ctx.fill();
+
+      // 遠方城堡剪影
+      ctx.fillStyle = "#090d20";
+      ctx.fillRect(35, 165, 80, 100); ctx.fillRect(55, 130, 40, 35);
+      ctx.fillRect(690, 175, 75, 90); ctx.fillRect(710, 145, 35, 30);
+      for (let i = 0; i < 5; i++) {
+        ctx.fillRect(25 + i * 18, 155 - (i % 2) * 12, 9, 20);
+        ctx.fillRect(680 + i * 18, 165 - (i % 2) * 10, 9, 20);
+      }
+      // 地面上的微光線條
+      ctx.strokeStyle = "rgba(100,140,255,.18)";
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 12; i++) {
+        ctx.beginPath(); ctx.moveTo(0, 300 + i * 14); ctx.lineTo(W, 300 + i * 14); ctx.stroke();
+      }
+    }
+
+    // ===== 繪製戰鬥框與裝飾角落 =====
+    function drawArena() {
+      ctx.fillStyle = "rgba(2,4,12,.82)";
+      ctx.fillRect(arena.x, arena.y, arena.w, arena.h);
+      ctx.strokeStyle = "#f4f6ff"; ctx.lineWidth = 4;
+      ctx.strokeRect(arena.x, arena.y, arena.w, arena.h);
+      ctx.fillStyle = "#9ba8d8";
+      [[arena.x,arena.y],[arena.x+arena.w-5,arena.y],
+       [arena.x,arena.y+arena.h-5],[arena.x+arena.w-5,arena.y+arena.h-5]]
+       .forEach(([x,y]) => ctx.fillRect(x,y,5,5));
+    }
+
+    // ===== 繪製像素骨刺 =====
+    function drawBone(a) {
+      ctx.fillStyle = "#eaf3ff";
+      ctx.fillRect(a.x, a.y, a.w, a.h);
+      ctx.fillStyle = "#9caacb";
+      if (a.w > a.h) {
+        ctx.fillRect(a.x, a.y - 3, 8, a.h + 6);
+        ctx.fillRect(a.x + a.w - 8, a.y - 3, 8, a.h + 6);
+      } else {
+        ctx.fillRect(a.x - 3, a.y, a.w + 6, 8);
+        ctx.fillRect(a.x - 3, a.y + a.h - 8, a.w + 6, 8);
+      }
+    }
+
+    // ===== 繪製玩家靈魂：紅色像素心形 =====
+    function drawPlayer() {
+      if (player.inv > 0 && Math.floor(frame / 4) % 2 === 0) return;
+      ctx.save(); ctx.translate(player.x, player.y);
+      ctx.fillStyle = "#ff315e";
+      ctx.beginPath();
+      ctx.moveTo(0, 8); ctx.lineTo(-10, -1); ctx.lineTo(-10, -7);
+      ctx.lineTo(-5, -11); ctx.lineTo(0, -6);
+      ctx.lineTo(5, -11); ctx.lineTo(10, -7); ctx.lineTo(10, -1);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#ff9bad"; ctx.fillRect(-5, -7, 3, 3);
+      ctx.restore();
+    }
+
+    // ===== 繪製所有遊戲物件與介面文字 =====
+    function draw() {
+      drawBackground();
+      // 上方標題與簡短提示
+      ctx.fillStyle = "#f5f6ff"; ctx.font = "bold 18px Courier New";
+      ctx.textAlign = "center"; ctx.fillText("THE LAST CORRIDOR", W / 2, 48);
+      ctx.fillStyle = "#aebbe8"; ctx.font = "12px Courier New";
+      ctx.fillText("DODGE • SURVIVE • KEEP YOUR SOUL", W / 2, 68);
+
+      drawArena();
+
+      // 攻擊物：骨刺、追蹤光球、預警／啟動光束
+      attacks.forEach(a => {
+        if (a.type === "bone") drawBone(a);
+        if (a.type === "orb") {
+          ctx.fillStyle = "rgba(255,220,100,.2)";
+          ctx.beginPath(); ctx.arc(a.x, a.y, 13, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#ffe66d";
+          ctx.fillRect(a.x - 5, a.y - 5, 10, 10);
+        }
+        if (a.type === "beam") {
+          ctx.fillStyle = a.active ? "rgba(255,80,180,.8)" : "rgba(255,80,180,.2)";
+          ctx.fillRect(a.x, a.y - a.h / 2, a.w, a.h);
+          ctx.fillStyle = a.active ? "#fff" : "#ff9bd6";
+          ctx.fillRect(a.x, a.y - 2, a.w, 4);
+        }
+      });
+
+      // 粒子特效
+      particles.forEach(p => {
+        ctx.globalAlpha = p.life / 40;
+        ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, 3, 3);
+      });
+      ctx.globalAlpha = 1;
+
+      // 玩家靈魂與回合倒數
+      drawPlayer();
+      ctx.fillStyle = "#dce4ff"; ctx.font = "12px Courier New";
+      ctx.fillText(`ROUND ${phase + 1}   ${Math.max(0, Math.ceil((2160 - frame) / 60))}s`,
+        W / 2, 425);
+
+      // 遊戲結束時顯示提示遮罩
+      if (!running) {
+        ctx.fillStyle = "rgba(0,0,0,.62)"; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = won ? "#ffe66d" : "#ff789e";
+        ctx.font = "bold 27px Courier New";
+        ctx.fillText(won ? "YOU SURVIVED!" : "GAME OVER", W / 2, 215);
+        ctx.fillStyle = "#fff"; ctx.font = "15px Courier New";
+        ctx.fillText("按下「開始 / 重新開始」再次挑戰", W / 2, 250);
+      }
+    }
+
+    // ===== 主迴圈：更新狀態並重繪畫面 =====
+    function loop() {
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // ===== 鍵盤事件：記錄按下與放開的按鍵 =====
+    window.addEventListener("keydown", e => {
+      keys[e.key] = true;
+      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+    });
+    window.addEventListener("keyup", e => { keys[e.key] = false; });
+
+    // ===== 滑鼠與觸控事件：支援拖曳控制靈魂 =====
+    function setPointer(e) {
+      const rect = canvas.getBoundingClientRect();
+      pointer.x = (e.clientX - rect.left) * W / rect.width;
+      pointer.y = (e.clientY - rect.top) * H / rect.height;
+    }
+    canvas.addEventListener("pointerdown", e => {
+      pointerDown = true; setPointer(e); canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener("pointermove", e => { if (pointerDown) setPointer(e); });
+    canvas.addEventListener("pointerup", () => { pointerDown = false; });
+    canvas.addEventListener("pointercancel", () => { pointerDown = false; });
+
+    // ===== 開始按鈕 =====
+    startBtn.addEventListener("click", resetGame);
+
+    // ===== 初次載入：顯示標題畫面，等待玩家開始 =====
+    resetGame();
+    running = false;
+    statusEl.textContent = "按下開始，進入夜之審判。";
+    loop();
+  </script>
+</body>
+</html>
